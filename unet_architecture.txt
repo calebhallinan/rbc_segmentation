@@ -1,0 +1,138 @@
+======================================================================
+RBC U-Net — segmentation-models-pytorch
+======================================================================
+Encoder : EfficientNet-B0  (pretrained ImageNet)
+Decoder : U-Net  (bilinear upsample + skip concat + Conv×2)
+Head    : Binary segmentation  (Conv2d 16→1)
+Input   : 3 × H × W  (ImageNet normalized, training crop 256×256)
+Output  : 1 × H × W  (raw logits → sigmoid → threshold for mask)
+======================================================================
+
+  Total parameters :   6,251,469
+    Encoder        :   4,007,548  (EfficientNet-B0)
+    Decoder        :   2,243,776  (U-Net decoder blocks)
+    Head           :         145  (Conv2d + bias)
+
+======================================================================
+ENCODER  —  EfficientNet-B0  (feature extraction + skip connections)
+======================================================================
+
+  Input image     (1, 3,   512, 512)  ──────────────────────────────┐
+       │                                                              │
+  [0]  identity   (1, 3,   512, 512)  ch=  3   ← raw input          │
+       │ stride 2                                                     │
+  [1]  stem        (1, 32,  256, 256)  ch= 32   ← Conv+BN+SiLU      │
+       │ stride 2                                                     │
+  [2]  stage 1     (1, 24,  128, 128)  ch= 24   ← MBConv×1 k3       │
+       │ stride 2                                                     │
+  [3]  stage 2     (1, 40,   64,  64)  ch= 40   ← MBConv×2 k5       │
+       │ stride 2                                                     │
+  [4]  stage 3     (1, 112,  32,  32)  ch=112   ← MBConv×3 k3       │
+       │ stride 2                                                     │
+  [5]  stage 4     (1, 320,  16,  16)  ch=320   ← MBConv×4 k5 ──────┘
+                                                   (bottleneck)
+
+  Skip connections pass feature maps [0]–[4] to decoder blocks.
+
+======================================================================
+DECODER  —  U-Net blocks  (upsample 2× → concat skip → Conv×2)
+======================================================================
+
+  Each block:  bilinear_upsample → cat(skip) → Conv-BN-ReLU × 2
+
+  Block 0  (deepest)
+    in  : upsample([5])=320ch + skip[4]=112ch  →  concat 432ch
+    conv1: Conv2d(432 → 256, k3, BN, ReLU)
+    conv2: Conv2d(256 → 256, k3, BN, ReLU)
+    out : (1, 256,  32,  32)
+
+  Block 1
+    in  : upsample([B0])=256ch + skip[3]= 40ch  →  concat 296ch
+    conv1: Conv2d(296 → 128, k3, BN, ReLU)
+    conv2: Conv2d(128 → 128, k3, BN, ReLU)
+    out : (1, 128,  64,  64)
+
+  Block 2
+    in  : upsample([B1])=128ch + skip[2]= 24ch  →  concat 152ch
+    conv1: Conv2d(152 →  64, k3, BN, ReLU)
+    conv2: Conv2d( 64 →  64, k3, BN, ReLU)
+    out : (1,  64, 128, 128)
+
+  Block 3
+    in  : upsample([B2])= 64ch + skip[1]= 32ch  →  concat  96ch
+    conv1: Conv2d( 96 →  32, k3, BN, ReLU)
+    conv2: Conv2d( 32 →  32, k3, BN, ReLU)
+    out : (1,  32, 256, 256)
+
+  Block 4  (shallowest — no encoder skip at this scale)
+    in  : upsample([B3])= 32ch  (no skip, 0ch added)
+    conv1: Conv2d( 32 →  16, k3, BN, ReLU)
+    conv2: Conv2d( 16 →  16, k3, BN, ReLU)
+    out : (1,  16, 512, 512)
+
+======================================================================
+SEGMENTATION HEAD
+======================================================================
+
+  Conv2d(16 → 1, kernel=3, padding=1)  →  raw logits (1, 1, 512, 512)
+  Apply sigmoid at inference to get probability map [0, 1]
+  Threshold (default 0.5) → binary RBC mask
+
+======================================================================
+FULL FORWARD PASS  —  512×512 input
+======================================================================
+
+  (1, 3,   512, 512)  ──── Encoder ────► skip[0..5]
+                                          │
+  (1, 320,  16,  16)  ──── Decoder B0 ──►│ + skip[4]=112ch → 256ch
+  (1, 256,  32,  32)  ──── Decoder B1 ──►│ + skip[3]= 40ch → 128ch
+  (1, 128,  64,  64)  ──── Decoder B2 ──►│ + skip[2]= 24ch →  64ch
+  (1,  64, 128, 128)  ──── Decoder B3 ──►│ + skip[1]= 32ch →  32ch
+  (1,  32, 256, 256)  ──── Decoder B4 ──►│ (no skip)        →  16ch
+  (1,  16, 512, 512)  ──── Head ─────────►  logits (1, 1, 512, 512)
+                                              │
+                                           sigmoid → prob map
+                                           threshold → binary mask
+
+======================================================================
+TRAINING CONFIG  (train_rbc_unet.py)
+======================================================================
+
+  Loss         : 0.5 × DiceLoss  +  0.5 × BCE  (pos_weight=1.0)
+  Optimizer    : AdamW  lr=1e-3  weight_decay=1e-4
+  Scheduler    : CosineAnnealingLR  T_max=50
+  Epochs       : 50    Batch size : 16    Workers : 4
+  AMP          : torch.autocast("cuda") + GradScaler
+  torch.compile: enabled if PyTorch ≥ 2.0
+
+  Augmentations (train):
+    RandomCrop(256×256)
+    HorizontalFlip  p=0.5
+    VerticalFlip    p=0.5
+    RandomRotate90  p=0.5
+    ColorJitter     brightness/contrast/saturation (0.8–1.2)  p=0.5
+    GaussianBlur    kernel (3–7)  p=0.3
+    GaussNoise      std (0.02–0.1)  p=0.3
+    HueSaturationValue  p=0.5
+    RGBShift        p=0.3
+    Normalize (ImageNet mean/std)
+    ToTensorV2
+
+  Augmentations (val):
+    CenterCrop(256×256)
+    Normalize (ImageNet mean/std)
+    ToTensorV2
+
+  Split        : 85/15 stratified by tile (prevents data leakage)
+  Checkpoint   : best val loss → rbcs/checkpoints/best_rbc_unet.pth
+
+======================================================================
+POST-PROCESSING  (predict_rbc.py / predict_wsi.py)
+======================================================================
+
+  Sliding window : 512px patches, 128px overlap
+  Blending       : Hanning window (smooth seams, highest weight at center)
+  Min RBC size   : 30 px  (cv2 connectedComponents, removes noise)
+  Threshold      : 0.5 default (adjustable via --threshold)
+
+======================================================================

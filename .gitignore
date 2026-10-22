@@ -1,0 +1,34 @@
+# Whitelist: only the pipeline that produced the final Ctrl/IR RBC masks is
+# tracked. Everything else (data, weights, QC images, the NDPI and UNI
+# attempts, the partial-label experiment) stays on disk but out of git.
+# To track a new file, add a `!` line for it below.
+
+/*
+
+!/.gitignore
+!/README.md
+!/methods_segmentation_details.md
+!/unet_architecture.txt
+
+# Pipeline, in order
+!/tiff/
+/tiff/*
+!/tiff/extract_tiles_tiff.py
+!/tiff/rbc_segmentation_mask_tiff.py
+!/tiff/prepare_training_data_tiff.py
+!/correct_masks.py
+!/combine_training_data.py
+!/train_rbc_unet.py
+!/predict_tif.py
+
+# List of the 190 hand-corrected training patches
+!/training_data_tiff_combined/
+/training_data_tiff_combined/*
+!/training_data_tiff_combined/corrected_patches_combined.json
+
+# Geometry sidecars for the four final masks (masks themselves go in a Release)
+!/unet_predictions_tiff/
+/unet_predictions_tiff/*
+!/unet_predictions_tiff/*_rbc_mask.meta.json
+
+__pycache__/
